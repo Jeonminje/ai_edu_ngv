@@ -1,0 +1,114 @@
+name: CI
+
+# CLAUDE.md의 Git 브랜치 정책: main은 보호 브랜치이며 모든 변경은 PR을 통해서만 병합한다.
+# 이 워크플로우는 PR이 열리거나 갱신될 때, 그리고 main에 병합된 뒤 자동으로 지속적 통합(빌드/정적분석)과
+# 지속적 테스트(TDD 유닛 테스트 + 커버리지)를 수행한다.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  # ── 지속적 통합: 정적분석 (순환복잡도/함수라인수/중복/스타일) ─────────────
+  lint-and-static-analysis:
+    name: Lint & Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Detect Python source
+        id: detect
+        shell: bash
+        run: |
+          if git ls-files -- '*.py' | grep -q .; then
+            echo "hasCode=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hasCode=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install analysis tools
+        if: steps.detect.outputs.hasCode == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install radon pylint
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Cyclomatic complexity (radon) — CLAUDE.md 기준 10 이하
+        if: steps.detect.outputs.hasCode == 'true'
+        run: radon cc . -s -n C
+
+      - name: Raw metrics (radon) — 함수 라인수 검토용
+        if: steps.detect.outputs.hasCode == 'true'
+        run: radon raw . -s
+
+      - name: Duplicate code check (pylint) — CLAUDE.md 기준 7라인 초과 금지
+        if: steps.detect.outputs.hasCode == 'true'
+        run: pylint --disable=all --enable=duplicate-code --min-similarity-lines=8 $(git ls-files '*.py')
+
+      - name: No Python source yet
+        if: steps.detect.outputs.hasCode == 'false'
+        run: echo "저장소에 아직 .py 소스가 없어 정적분석을 건너뜁니다."
+
+  # ── 지속적 테스트: unittest + Branch 커버리지 100% (CLAUDE.md 필수 지표) ─
+  test-and-coverage:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    needs: lint-and-static-analysis
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Detect test suite
+        id: detect
+        shell: bash
+        run: |
+          if git ls-files -- 'test_*.py' '*_test.py' 'tests/*.py' | grep -q .; then
+            echo "hasTests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hasTests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install test tools
+        if: steps.detect.outputs.hasTests == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install coverage
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run unittest (테스트 성공률 100% 필수)
+        if: steps.detect.outputs.hasTests == 'true'
+        run: coverage run --branch -m unittest discover -v
+
+      - name: Branch coverage report (100% 필수)
+        if: steps.detect.outputs.hasTests == 'true'
+        run: coverage report -m --fail-under=100
+
+      - name: Upload coverage report
+        if: steps.detect.outputs.hasTests == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .coverage
+
+      - name: No test suite yet
+        if: steps.detect.outputs.hasTests == 'false'
+        run: echo "저장소에 아직 unittest 테스트가 없어 테스트 단계를 건너뜁니다."
